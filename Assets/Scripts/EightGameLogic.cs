@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using UnityEngine;
 
 namespace Assets.Scripts
@@ -35,25 +34,6 @@ namespace Assets.Scripts
                 var whiteDead = WhiteA == 0 && WhiteB == 0;
                 var blackDead = BlackA == 0 && BlackB == 0;
                 return whiteDead || blackDead;
-            }
-        }
-
-        public int OutcomeForSideToMove
-        {
-            get
-            {
-                var sideToMoveDead = WhiteTurn
-                    ? WhiteA == 0 && WhiteB == 0
-                    : BlackA == 0 && BlackB == 0;
-
-                var opponentDead = WhiteTurn
-                    ? BlackA == 0 && BlackB == 0
-                    : WhiteA == 0 && WhiteB == 0;
-
-                if (sideToMoveDead && opponentDead) return 0;
-                if (sideToMoveDead) return -1;
-                if (opponentDead) return 1;
-                return 0;
             }
         }
 
@@ -157,8 +137,12 @@ namespace Assets.Scripts
     {
         public static IReadOnlyList<EightMove> GetLegalMoves(EightGameState state)
         {
-            var ownHands = state.WhiteTurn ? new[] { state.WhiteA, state.WhiteB } : new[] { state.BlackA, state.BlackB };
-            var oppHands = state.WhiteTurn ? new[] { state.BlackA, state.BlackB } : new[] { state.WhiteA, state.WhiteB };
+            var ownHands = state.WhiteTurn
+                ? new[] { state.WhiteA, state.WhiteB }
+                : new[] { state.BlackA, state.BlackB };
+            var oppHands = state.WhiteTurn
+                ? new[] { state.BlackA, state.BlackB }
+                : new[] { state.WhiteA, state.WhiteB };
 
             var moves = new List<EightMove>(4);
             for (var ownIndex = 0; ownIndex < ownHands.Length; ownIndex++)
@@ -213,10 +197,14 @@ namespace Assets.Scripts
 
     public sealed class Data8Book
     {
-        private readonly Dictionary<EightGameState, HashSet<EightGameState>> _transitions = new Dictionary<EightGameState, HashSet<EightGameState>>();
-        private readonly Dictionary<EightGameState, string> _classesByState = new Dictionary<EightGameState, string>();
+        private const int TurnBit = 1 << 12;
 
-        public IReadOnlyCollection<EightGameState> States => _classesByState.Keys.ToArray();
+        private readonly Dictionary<int, EightGameState[]> _transitionsByKey = new Dictionary<int, EightGameState[]>();
+        private readonly Dictionary<int, string> _classesByKey = new Dictionary<int, string>();
+        private readonly Dictionary<int, sbyte> _rankForWhiteByKey = new Dictionary<int, sbyte>();
+        private EightGameState[] _states = Array.Empty<EightGameState>();
+
+        public IReadOnlyCollection<EightGameState> States => _states;
 
         public static Data8Book LoadFromText(string json)
         {
@@ -228,7 +216,9 @@ namespace Assets.Scripts
             }
 
             var book = new Data8Book();
-            var nodeById = new Dictionary<string, EightGameState>();
+            var nodeKeyById = new Dictionary<string, int>();
+            var stateByKey = new Dictionary<int, EightGameState>();
+            var transitionKeySets = new Dictionary<int, HashSet<int>>();
 
             foreach (var item in root.items)
             {
@@ -245,32 +235,68 @@ namespace Assets.Scripts
                     }
 
                     var normalizedState = state.NormalizeForCalculation();
-                    nodeById[item.data.id] = normalizedState;
-                    book._classesByState[normalizedState] = item.classes ?? string.Empty;
-                    if (!book._transitions.ContainsKey(normalizedState))
+                    var stateKey = ToPackedStateKey(normalizedState);
+                    nodeKeyById[item.data.id] = stateKey;
+                    stateByKey[stateKey] = normalizedState;
+
+                    var stateClass = item.classes ?? string.Empty;
+                    book._classesByKey[stateKey] = stateClass;
+                    book._rankForWhiteByKey[stateKey] = ParseRankForWhite(stateClass);
+
+                    if (!transitionKeySets.ContainsKey(stateKey))
                     {
-                        book._transitions[normalizedState] = new HashSet<EightGameState>();
+                        transitionKeySets[stateKey] = new HashSet<int>();
                     }
                 }
             }
 
+            book._states = new EightGameState[stateByKey.Count];
+            var stateIndex = 0;
+            foreach (var state in stateByKey.Values)
+            {
+                book._states[stateIndex++] = state;
+            }
+
             foreach (var item in root.items)
             {
-                if (item?.data == null || string.IsNullOrWhiteSpace(item.data.source) || string.IsNullOrWhiteSpace(item.data.target))
+                if (item?.data == null || string.IsNullOrWhiteSpace(item.data.source) ||
+                    string.IsNullOrWhiteSpace(item.data.target))
                 {
                     continue;
                 }
 
-                if (!nodeById.TryGetValue(item.data.source, out var sourceState)) continue;
-                if (!nodeById.TryGetValue(item.data.target, out var targetState)) continue;
+                if (!nodeKeyById.TryGetValue(item.data.source, out var sourceKey)) continue;
+                if (!nodeKeyById.TryGetValue(item.data.target, out var targetKey)) continue;
 
-                if (!book._transitions.TryGetValue(sourceState, out var targets))
+                if (!transitionKeySets.TryGetValue(sourceKey, out var targetSet))
                 {
-                    targets = new HashSet<EightGameState>();
-                    book._transitions[sourceState] = targets;
+                    targetSet = new HashSet<int>();
+                    transitionKeySets[sourceKey] = targetSet;
                 }
 
-                targets.Add(targetState);
+                targetSet.Add(targetKey);
+            }
+
+            foreach (var entry in transitionKeySets)
+            {
+                var nextStates = new EightGameState[entry.Value.Count];
+                var i = 0;
+                foreach (var targetKey in entry.Value)
+                {
+                    if (!stateByKey.TryGetValue(targetKey, out var targetState))
+                    {
+                        continue;
+                    }
+
+                    nextStates[i++] = targetState;
+                }
+
+                if (i != nextStates.Length)
+                {
+                    Array.Resize(ref nextStates, i);
+                }
+
+                book._transitionsByKey[entry.Key] = nextStates;
             }
 
             return book;
@@ -278,42 +304,102 @@ namespace Assets.Scripts
 
         public bool TryGetClass(EightGameState state, out string stateClass)
         {
-            var normalized = state.NormalizeForCalculation();
-            if (_classesByState.TryGetValue(normalized, out stateClass))
+            var normalizedKey = ToPackedStateKey(state.NormalizeForCalculation());
+            if (_classesByKey.TryGetValue(normalizedKey, out stateClass))
             {
                 return true;
             }
 
-            var flippedTurn = new EightGameState(
-                normalized.WhiteA,
-                normalized.WhiteB,
-                normalized.BlackA,
-                normalized.BlackB,
-                !normalized.WhiteTurn);
+            return _classesByKey.TryGetValue(FlipTurn(normalizedKey), out stateClass);
+        }
 
-            return _classesByState.TryGetValue(flippedTurn, out stateClass);
+        public bool TryGetSideToMoveRank(EightGameState state, out int rank)
+        {
+            var normalized = state.NormalizeForCalculation();
+            var normalizedKey = ToPackedStateKey(normalized);
+            if (_rankForWhiteByKey.TryGetValue(normalizedKey, out var rankForWhite))
+            {
+                rank = normalized.WhiteTurn ? rankForWhite : -rankForWhite;
+                return true;
+            }
+
+            if (_rankForWhiteByKey.TryGetValue(FlipTurn(normalizedKey), out rankForWhite))
+            {
+                rank = normalized.WhiteTurn ? rankForWhite : -rankForWhite;
+                return true;
+            }
+
+            rank = 0;
+            return false;
         }
 
         public IReadOnlyList<EightGameState> GetPossibleNextStates(EightGameState state)
         {
-            var normalized = state.NormalizeForCalculation();
-            if (_transitions.TryGetValue(normalized, out var states))
+            var normalizedKey = ToPackedStateKey(state.NormalizeForCalculation());
+            if (_transitionsByKey.TryGetValue(normalizedKey, out var states))
             {
-                return states.ToArray();
+                return states;
             }
 
-            var flippedTurn = new EightGameState(
-                normalized.WhiteA,
-                normalized.WhiteB,
-                normalized.BlackA,
-                normalized.BlackB,
-                !normalized.WhiteTurn);
-            if (_transitions.TryGetValue(flippedTurn, out states))
+            if (_transitionsByKey.TryGetValue(FlipTurn(normalizedKey), out states))
             {
-                return states.ToArray();
+                return states;
             }
 
             return Array.Empty<EightGameState>();
+        }
+
+        private static int ToPackedStateKey(EightGameState state)
+        {
+            return state.WhiteA
+                   | (state.WhiteB << 3)
+                   | (state.BlackA << 6)
+                   | (state.BlackB << 9)
+                   | (state.WhiteTurn ? TurnBit : 0);
+        }
+
+        private static int FlipTurn(int key)
+        {
+            return key ^ TurnBit;
+        }
+
+        private static sbyte ParseRankForWhite(string stateClass)
+        {
+            if (string.IsNullOrWhiteSpace(stateClass))
+            {
+                return 0;
+            }
+
+            var tags = stateClass.Split(' ');
+            var classSide = string.Empty;
+            var hasWin = false;
+            var hasWinWin = false;
+            var hasLose = false;
+            var hasLoseLose = false;
+
+            foreach (var raw in tags)
+            {
+                if (string.IsNullOrWhiteSpace(raw)) continue;
+                var tag = raw.Trim().ToLowerInvariant();
+                if (tag == "white" || tag == "black") classSide = tag;
+                else if (tag == "win") hasWin = true;
+                else if (tag == "winwin") hasWinWin = true;
+                else if (tag == "lose") hasLose = true;
+                else if (tag == "loselose") hasLoseLose = true;
+            }
+
+            var classSideRank = 0;
+            if (hasWinWin) classSideRank = 2;
+            else if (hasWin) classSideRank = 1;
+            else if (hasLoseLose) classSideRank = -2;
+            else if (hasLose) classSideRank = -1;
+
+            if (string.IsNullOrEmpty(classSide) || classSideRank == 0)
+            {
+                return 0;
+            }
+
+            return (sbyte)(classSide == "white" ? classSideRank : -classSideRank);
         }
 
         private static bool TryParseState(string label, out EightGameState state)
@@ -388,203 +474,6 @@ namespace Assets.Scripts
             public string label;
             public string source;
             public string target;
-        }
-    }
-
-    public enum StrategyOutcome
-    {
-        Lose = -1,
-        Draw = 0,
-        Win = 1
-    }
-
-    public readonly struct StrategyEvaluation
-    {
-        public readonly StrategyOutcome Outcome;
-        public readonly int Plies;
-        public readonly EightMove? BestMove;
-
-        public StrategyEvaluation(StrategyOutcome outcome, int plies, EightMove? bestMove)
-        {
-            Outcome = outcome;
-            Plies = plies;
-            BestMove = bestMove;
-        }
-    }
-
-    public sealed class EightBotSolver
-    {
-        private readonly Dictionary<EightGameState, StrategyScore> _memo = new Dictionary<EightGameState, StrategyScore>();
-        private readonly HashSet<EightGameState> _active = new HashSet<EightGameState>();
-
-        public StrategyEvaluation Evaluate(EightGameState state)
-        {
-            if (state.IsTerminal)
-            {
-                var terminalOutcome = ToOutcome(state.OutcomeForSideToMove);
-                return new StrategyEvaluation(terminalOutcome, 0, null);
-            }
-
-            var legalMoves = EightGameRules.GetLegalMoves(state);
-            if (legalMoves.Count == 0)
-            {
-                return new StrategyEvaluation(StrategyOutcome.Lose, 0, null);
-            }
-
-            var best = new StrategyEvaluation(StrategyOutcome.Lose, int.MinValue, null);
-            foreach (var move in legalMoves)
-            {
-                var child = EightGameRules.ApplyMove(state, move);
-                var childScore = EvaluateScoreInternal(child);
-                var candidate = FlipPerspective(new StrategyEvaluation(childScore.Outcome, childScore.Plies, null), move);
-                if (IsBetter(candidate, best))
-                {
-                    best = candidate;
-                }
-            }
-
-            return best;
-        }
-
-        public EightMove? GetBestMove(EightGameState state)
-        {
-            return Evaluate(state).BestMove;
-        }
-
-        private StrategyScore EvaluateScoreInternal(EightGameState state)
-        {
-            var key = state.NormalizeForCalculation();
-            if (_memo.TryGetValue(key, out var cached)) return cached;
-
-            if (state.IsTerminal)
-            {
-                var terminal = new StrategyScore(ToOutcome(state.OutcomeForSideToMove), 0);
-                _memo[key] = terminal;
-                return terminal;
-            }
-
-            if (_active.Contains(key))
-            {
-                return new StrategyScore(StrategyOutcome.Draw, 0);
-            }
-
-            _active.Add(key);
-            try
-            {
-                var legalMoves = EightGameRules.GetLegalMoves(state);
-                if (legalMoves.Count == 0)
-                {
-                    var noMove = new StrategyScore(StrategyOutcome.Lose, 0);
-                    _memo[key] = noMove;
-                    return noMove;
-                }
-
-                var best = new StrategyScore(StrategyOutcome.Lose, int.MinValue);
-
-                foreach (var move in legalMoves)
-                {
-                    var child = EightGameRules.ApplyMove(state, move);
-                    var childEval = EvaluateScoreInternal(child);
-                    var currentEval = FlipPerspectiveScore(childEval);
-
-                    if (IsBetterScore(currentEval, best))
-                    {
-                        best = currentEval;
-                    }
-                }
-
-                _memo[key] = best;
-                return best;
-            }
-            finally
-            {
-                _active.Remove(key);
-            }
-        }
-
-        private static StrategyScore FlipPerspectiveScore(StrategyScore child)
-        {
-            switch (child.Outcome)
-            {
-                case StrategyOutcome.Win:
-                    return new StrategyScore(StrategyOutcome.Lose, child.Plies + 1);
-                case StrategyOutcome.Lose:
-                    return new StrategyScore(StrategyOutcome.Win, child.Plies + 1);
-                default:
-                    return new StrategyScore(StrategyOutcome.Draw, child.Plies + 1);
-            }
-        }
-
-        private static bool IsBetterScore(StrategyScore candidate, StrategyScore currentBest)
-        {
-            if (candidate.Outcome != currentBest.Outcome)
-            {
-                return candidate.Outcome > currentBest.Outcome;
-            }
-
-            if (candidate.Outcome == StrategyOutcome.Win)
-            {
-                return candidate.Plies < currentBest.Plies;
-            }
-
-            if (candidate.Outcome == StrategyOutcome.Lose)
-            {
-                return candidate.Plies > currentBest.Plies;
-            }
-
-            return candidate.Plies < currentBest.Plies;
-        }
-
-        private static StrategyEvaluation FlipPerspective(StrategyEvaluation child, EightMove moveUsed)
-        {
-            switch (child.Outcome)
-            {
-                case StrategyOutcome.Win:
-                    return new StrategyEvaluation(StrategyOutcome.Lose, child.Plies + 1, moveUsed);
-                case StrategyOutcome.Lose:
-                    return new StrategyEvaluation(StrategyOutcome.Win, child.Plies + 1, moveUsed);
-                default:
-                    return new StrategyEvaluation(StrategyOutcome.Draw, child.Plies + 1, moveUsed);
-            }
-        }
-
-        private static bool IsBetter(StrategyEvaluation candidate, StrategyEvaluation currentBest)
-        {
-            if (candidate.Outcome != currentBest.Outcome)
-            {
-                return candidate.Outcome > currentBest.Outcome;
-            }
-
-            if (candidate.Outcome == StrategyOutcome.Win)
-            {
-                return candidate.Plies < currentBest.Plies;
-            }
-
-            if (candidate.Outcome == StrategyOutcome.Lose)
-            {
-                return candidate.Plies > currentBest.Plies;
-            }
-
-            return candidate.Plies < currentBest.Plies;
-        }
-
-        private readonly struct StrategyScore
-        {
-            public readonly StrategyOutcome Outcome;
-            public readonly int Plies;
-
-            public StrategyScore(StrategyOutcome outcome, int plies)
-            {
-                Outcome = outcome;
-                Plies = plies;
-            }
-        }
-
-        private static StrategyOutcome ToOutcome(int value)
-        {
-            if (value > 0) return StrategyOutcome.Win;
-            if (value < 0) return StrategyOutcome.Lose;
-            return StrategyOutcome.Draw;
         }
     }
 }

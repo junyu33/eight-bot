@@ -2,6 +2,8 @@ using UnityEngine;
 using System.Linq;
 using System.Collections;
 using UnityEngine.InputSystem;
+using UnityEngine.UI;
+using TMPro;
 
 namespace Assets.Scripts
 {
@@ -11,22 +13,40 @@ namespace Assets.Scripts
         [SerializeField] private bool whiteIsHuman = true;
         [SerializeField] private bool blackIsHuman = false;
         [SerializeField] private float botMoveDelaySeconds = 0.55f;
-        [Header("Bot Move Animation")] [SerializeField]
+
+        [Header("Bot Move Animation")]
+        [SerializeField]
         private float botApproachDurationSeconds = 0.18f;
+
         [SerializeField] private float botStopNearTargetDistance = 0.8f;
 
         [SerializeField] private float botImpactPauseSeconds = 0.1f;
         [SerializeField] private float botResultHoldSeconds = 0.2f;
         [SerializeField] private float botReturnDurationSeconds = 0.2f;
-        [Header("Debug UI")] [SerializeField] private bool showDebugPanel = false;
+        [Header("Debug UI")][SerializeField] private bool showDebugPanel = false;
         [SerializeField] private bool allowToggleDebugHotkey = true;
         [SerializeField] private Key toggleDebugKey = Key.F1;
-        [Header("Turn Background")] [SerializeField]
+        [SerializeField] private string whiteSideDisplayName = "Blue";
+        [SerializeField] private string blackSideDisplayName = "Red";
+        [SerializeField] private GameObject endGameBannerRoot;
+        [SerializeField] private TMP_Text endGameBannerText;
+        [SerializeField] private GameObject debugPanelRoot;
+        [SerializeField] private TMP_Text debugInfoText;
+        [SerializeField] private TMP_Text debugStatusText;
+        [SerializeField] private TMP_Text debugFlagsText;
+        [SerializeField] private GameObject debugButtonsRow;
+        [SerializeField] private Button restartButton;
+        [SerializeField] private Button toggleWhiteButton;
+        [SerializeField] private Button toggleBlackButton;
+
+        [Header("Turn Background")]
+        [SerializeField]
         private Color p1TurnBackgroundColor = new Color(0.06f, 0.32f, 0.73f, 1f); // sapphire
 
         [SerializeField] private Color p2TurnBackgroundColor = new Color(0.98f, 0.62f, 0.82f, 1f); // pink
 
-        [Header("Drag Input")] [SerializeField]
+        [Header("Drag Input")]
+        [SerializeField]
         private Transform p1Left;
 
         [SerializeField] private Transform p1Right;
@@ -35,7 +55,8 @@ namespace Assets.Scripts
         [SerializeField] private float pickRadiusWorld = 1.4f;
         [SerializeField] private float dropNearOpponentDistance = 2.1f;
 
-        [Header("Hand Sprites (1..7)")] [SerializeField]
+        [Header("Hand Sprites (1..7)")]
+        [SerializeField]
         private Sprite[] blueHandSprites = new Sprite[7];
 
         [SerializeField] private Sprite[] redHandSprites = new Sprite[7];
@@ -57,6 +78,8 @@ namespace Assets.Scripts
         private bool _isBotAnimating;
         private bool _botAnimatingTurnWasWhite;
         private bool _isPlayerReturnAnimating;
+        private bool _playerReturnAnimatingTurnWasWhite;
+        private bool _loggedMissingUiRefs;
 
         private void Start()
         {
@@ -70,16 +93,27 @@ namespace Assets.Scripts
             EnsureHandRenderers();
             AutoFillSpritesFromProjectIfNeeded();
             _mainCamera = Camera.main;
+            WireUiCallbacks();
 
             GameConfig.ResetState();
             ApplyTurnBackgroundColor(GameConfig.CurrentState);
             RefreshHandSprites();
             _nextBotMoveAt = Time.time + botMoveDelaySeconds;
+            RefreshRuntimeUi();
+        }
+
+        private void OnDestroy()
+        {
+            UnwireUiCallbacks();
         }
 
         private void Update()
         {
-            if (brain == null) return;
+            if (brain == null)
+            {
+                RefreshRuntimeUi();
+                return;
+            }
 
             var state = brain.CurrentState;
             if (state.IsTerminal)
@@ -90,15 +124,7 @@ namespace Assets.Scripts
                 }
 
                 RefreshHandSprites();
-                if (_isBotAnimating)
-                {
-                    ApplyTurnBackgroundColor(_botAnimatingTurnWasWhite);
-                }
-                else
-                {
-                    ApplyTurnBackgroundColor(state);
-                }
-
+                RefreshRuntimeUi();
                 return;
             }
 
@@ -107,24 +133,24 @@ namespace Assets.Scripts
             if (_isBotAnimating || _isPlayerReturnAnimating)
             {
                 RefreshHandSprites();
-                if (_isBotAnimating)
-                {
-                    ApplyTurnBackgroundColor(_botAnimatingTurnWasWhite);
-                }
-                else
-                {
-                    ApplyTurnBackgroundColor(GameConfig.CurrentState);
-                }
-
+                RefreshRuntimeUi();
                 return;
             }
 
             HandleHumanDragInput(state);
             RefreshHandSprites();
-            ApplyTurnBackgroundColor(GameConfig.CurrentState);
 
-            if (IsHumanTurn(state)) return;
-            if (Time.time < _nextBotMoveAt) return;
+            if (IsHumanTurn(state))
+            {
+                RefreshRuntimeUi();
+                return;
+            }
+
+            if (Time.time < _nextBotMoveAt)
+            {
+                RefreshRuntimeUi();
+                return;
+            }
 
             var move = brain.GetOptimalMove();
             if (move.HasValue)
@@ -135,116 +161,118 @@ namespace Assets.Scripts
             {
                 _nextBotMoveAt = Time.time + botMoveDelaySeconds;
             }
+
+            RefreshRuntimeUi();
         }
 
-        private void OnGUI()
+        private void RefreshRuntimeUi()
         {
-            DrawEndGameBanner();
+            if (endGameBannerRoot != null)
+            {
+                var hasTerminal = brain != null && brain.CurrentState.IsTerminal;
+                endGameBannerRoot.SetActive(hasTerminal);
+                if (hasTerminal && endGameBannerText != null)
+                {
+                    var state = brain.CurrentState;
+                    endGameBannerText.text = GetWinnerBannerText(state);
+                }
+            }
 
+            if (debugPanelRoot == null)
+            {
+                LogMissingUiRefsOnce();
+                return;
+            }
+
+            debugPanelRoot.SetActive(showDebugPanel);
             if (!showDebugPanel) return;
 
             if (brain == null)
             {
-                DrawMissingBrainMessage();
-                return;
-            }
-
-            var state = brain.CurrentState;
-            var eval = brain.EvaluateCurrentState();
-            brain.TryGetCurrentStateClassFromData8(out var data8Class);
-            var nextCount = brain.GetAllPossibleNextStatesFromData8().Count;
-
-            GUILayout.BeginArea(new Rect(20f, 20f, 560f, 560f), GUI.skin.box);
-            GUILayout.Label("Rule Of 8 - Playable Controller");
-            GUILayout.Space(6f);
-            GUILayout.Label($"White: ({state.WhiteA}, {state.WhiteB})");
-            GUILayout.Label($"Black: ({state.BlackA}, {state.BlackB})");
-            GUILayout.Label($"Turn: {(state.WhiteTurn ? "White" : "Black")}");
-            GUILayout.Label($"Solver: {eval.Outcome} in {eval.Plies} ply");
-            GUILayout.Label($"data8 class: {(string.IsNullOrWhiteSpace(data8Class) ? "<none>" : data8Class)}");
-            GUILayout.Label($"data8 next states: {nextCount}");
-
-            if (state.IsTerminal)
-            {
-                GUILayout.Space(10f);
-                GUILayout.Label(GetWinnerText(state));
-                if (GUILayout.Button("Restart", GUILayout.Height(32f)))
+                if (debugInfoText != null)
                 {
-                    RestartGame();
+                    debugInfoText.text =
+                        "EightGamePlayableController: EightBotBrain reference is missing.\nAttach this script to the same GameObject as EightBotBrain.";
                 }
 
-                GUILayout.EndArea();
+                if (debugStatusText != null) debugStatusText.text = string.Empty;
+                if (debugFlagsText != null) debugFlagsText.text = string.Empty;
+                if (debugButtonsRow != null) debugButtonsRow.SetActive(false);
                 return;
             }
 
-            GUILayout.Space(10f);
-            if (IsHumanTurn(state))
+            var currentState = brain.CurrentState;
+            brain.TryGetCurrentStateClassFromData8(out var data8Class);
+            var nextCount = brain.GetAllPossibleNextStatesFromData8().Count;
+            if (debugInfoText != null)
             {
-                GUILayout.Label("Human turn: drag your hand close to one opponent hand and release.");
-            }
-            else
-            {
-                GUILayout.Label("Bot is thinking...");
-            }
-
-            GUILayout.Space(8f);
-            GUILayout.BeginHorizontal();
-            if (GUILayout.Button("Restart", GUILayout.Height(28f)))
-            {
-                RestartGame();
+                debugInfoText.text =
+                    $"Rule Of 8 - Playable Controller\nWhite: ({currentState.WhiteA}, {currentState.WhiteB})\nBlack: ({currentState.BlackA}, {currentState.BlackB})\nTurn: {(currentState.WhiteTurn ? "White" : "Black")}\ndata8 class: {(string.IsNullOrWhiteSpace(data8Class) ? "<none>" : data8Class)}\ndata8 next states: {nextCount}";
             }
 
-            if (GUILayout.Button("Toggle White Human", GUILayout.Height(28f)))
+            if (debugStatusText != null)
             {
-                whiteIsHuman = !whiteIsHuman;
+                debugStatusText.text = currentState.IsTerminal
+                    ? GetWinnerStatusText(currentState)
+                    : (IsHumanTurn(currentState)
+                        ? "Human turn: drag your hand close to one opponent hand and release."
+                        : "Bot is thinking...");
             }
 
-            if (GUILayout.Button("Toggle Black Human", GUILayout.Height(28f)))
+            if (debugFlagsText != null)
             {
-                blackIsHuman = !blackIsHuman;
+                debugFlagsText.text = $"White Human: {whiteIsHuman}, Black Human: {blackIsHuman}";
             }
 
-            GUILayout.EndHorizontal();
-
-            GUILayout.Label($"White Human: {whiteIsHuman}, Black Human: {blackIsHuman}");
-            GUILayout.EndArea();
+            if (debugButtonsRow != null) debugButtonsRow.SetActive(true);
+            if (toggleWhiteButton != null) toggleWhiteButton.gameObject.SetActive(!currentState.IsTerminal);
+            if (toggleBlackButton != null) toggleBlackButton.gameObject.SetActive(!currentState.IsTerminal);
         }
 
-        private void DrawEndGameBanner()
+        private void WireUiCallbacks()
         {
-            if (brain == null) return;
+            if (restartButton != null)
+            {
+                restartButton.onClick.RemoveListener(RestartGame);
+                restartButton.onClick.AddListener(RestartGame);
+            }
 
-            var state = brain.CurrentState;
-            if (!state.IsTerminal) return;
+            if (toggleWhiteButton != null)
+            {
+                toggleWhiteButton.onClick.RemoveListener(ToggleWhiteHuman);
+                toggleWhiteButton.onClick.AddListener(ToggleWhiteHuman);
+            }
 
-            var whiteDead = state.WhiteA == 0 && state.WhiteB == 0;
-            var blackDead = state.BlackA == 0 && state.BlackB == 0;
+            if (toggleBlackButton != null)
+            {
+                toggleBlackButton.onClick.RemoveListener(ToggleBlackHuman);
+                toggleBlackButton.onClick.AddListener(ToggleBlackHuman);
+            }
+        }
 
-            string text;
-            if (whiteDead && blackDead) text = "Draw!";
-            else if (whiteDead) text = "Red wins!";
-            else if (blackDead) text = "Blue wins!";
-            else text = "Game over";
+        private void UnwireUiCallbacks()
+        {
+            if (restartButton != null) restartButton.onClick.RemoveListener(RestartGame);
+            if (toggleWhiteButton != null) toggleWhiteButton.onClick.RemoveListener(ToggleWhiteHuman);
+            if (toggleBlackButton != null) toggleBlackButton.onClick.RemoveListener(ToggleBlackHuman);
+        }
 
-            var oldAlignment = GUI.skin.label.alignment;
-            var oldFontSize = GUI.skin.label.fontSize;
-            var oldTextColor = GUI.skin.label.normal.textColor;
+        private void ToggleWhiteHuman()
+        {
+            whiteIsHuman = !whiteIsHuman;
+        }
 
-            GUI.skin.label.alignment = TextAnchor.MiddleCenter;
-            GUI.skin.label.fontSize = 48;
-            GUI.skin.label.normal.textColor = Color.white;
+        private void ToggleBlackHuman()
+        {
+            blackIsHuman = !blackIsHuman;
+        }
 
-            const float width = 520f;
-            const float height = 90f;
-            var x = (Screen.width - width) * 0.5f;
-            var y = (Screen.height - height) * 0.5f - 20f;
-
-            GUI.Box(new Rect(x - 12f, y - 8f, width + 24f, height + 16f), GUIContent.none);
-            GUI.Label(new Rect(x, y, width, height), text);
-
-            GUI.skin.label.alignment = oldAlignment;
-            GUI.skin.label.fontSize = oldFontSize;
-            GUI.skin.label.normal.textColor = oldTextColor;
+        private void LogMissingUiRefsOnce()
+        {
+            if (_loggedMissingUiRefs) return;
+            _loggedMissingUiRefs = true;
+            Debug.LogWarning(
+                "EightGamePlayableController: Debug UI references are not assigned in the scene. Assign Debug Panel, texts, and buttons in the inspector.");
         }
 
         private bool IsHumanTurn(EightGameState state)
@@ -252,15 +280,41 @@ namespace Assets.Scripts
             return state.WhiteTurn ? whiteIsHuman : blackIsHuman;
         }
 
-        private static string GetWinnerText(EightGameState state)
+        private string GetWinnerBannerText(EightGameState state)
         {
-            var whiteDead = state.WhiteA == 0 && state.WhiteB == 0;
-            var blackDead = state.BlackA == 0 && state.BlackB == 0;
-
-            if (whiteDead && blackDead) return "Game over: Draw";
-            if (whiteDead) return "Game over: Black wins";
-            if (blackDead) return "Game over: White wins";
+            var winner = ResolveWinner(state);
+            if (winner == WinnerSide.Draw) return "Draw!";
+            if (winner == WinnerSide.White) return $"{whiteSideDisplayName} wins!";
+            if (winner == WinnerSide.Black) return $"{blackSideDisplayName} wins!";
             return "Game over";
+        }
+
+        private string GetWinnerStatusText(EightGameState state)
+        {
+            var winner = ResolveWinner(state);
+            if (winner == WinnerSide.Draw) return "Game over: Draw";
+            if (winner == WinnerSide.White) return "Game over: White wins";
+            if (winner == WinnerSide.Black) return "Game over: Black wins";
+            return "Game over";
+        }
+
+        private static WinnerSide ResolveWinner(EightGameState state)
+        {
+            if (!state.IsTerminal) return WinnerSide.None;
+            var whiteDead = state is { WhiteA: 0, WhiteB: 0 };
+            var blackDead = state is { BlackA: 0, BlackB: 0 };
+            if (whiteDead && blackDead) return WinnerSide.Draw;
+            if (whiteDead) return WinnerSide.White;
+            if (blackDead) return WinnerSide.Black;
+            return WinnerSide.None;
+        }
+
+        private enum WinnerSide
+        {
+            None,
+            White,
+            Black,
+            Draw
         }
 
         private void HandleHumanDragInput(EightGameState state)
@@ -389,12 +443,13 @@ namespace Assets.Scripts
 
             var ownHand = GetHandTransform(ownIsWhite, _dragOwnHandIndex);
             var ownStartPos = GetHandStartPosition(ownIsWhite, _dragOwnHandIndex);
-            brain.ApplyMove(new EightMove(_dragOwnHandIndex, chosenOpponentIndex));
+            var move = new EightMove(_dragOwnHandIndex, chosenOpponentIndex);
+            brain.ApplyMove(move);
             RefreshHandSprites();
 
             if (ownHand != null)
             {
-                StartCoroutine(AnimatePlayerHandBack(ownHand, ownHand.position, ownStartPos));
+                StartCoroutine(AnimatePlayerHandBack(ownHand, ownHand.position, ownStartPos, ownIsWhite));
             }
             else
             {
@@ -454,13 +509,15 @@ namespace Assets.Scripts
             yield return AnimateHandPosition(ownHand, ownHand.position, startPos, botReturnDurationSeconds);
 
             ResetHandPositions();
+            ApplyTurnBackgroundColor(GameConfig.CurrentState);
             _nextBotMoveAt = Time.time + botMoveDelaySeconds;
             _isBotAnimating = false;
         }
 
-        private IEnumerator AnimatePlayerHandBack(Transform hand, Vector3 from, Vector3 to)
+        private IEnumerator AnimatePlayerHandBack(Transform hand, Vector3 from, Vector3 to, bool animatingTurnWasWhite)
         {
             _isPlayerReturnAnimating = true;
+            _playerReturnAnimatingTurnWasWhite = animatingTurnWasWhite;
 
             if (botResultHoldSeconds > 0f)
             {
@@ -469,6 +526,7 @@ namespace Assets.Scripts
 
             yield return AnimateHandPosition(hand, from, to, botReturnDurationSeconds);
             ResetHandPositions();
+            ApplyTurnBackgroundColor(GameConfig.CurrentState);
             _isPlayerReturnAnimating = false;
             _nextBotMoveAt = Time.time + botMoveDelaySeconds;
         }
@@ -672,7 +730,7 @@ namespace Assets.Scripts
             if (toggleDebugKey == Key.None) return;
 
             var keyControl = Keyboard.current[toggleDebugKey];
-            if (keyControl != null && keyControl.wasPressedThisFrame)
+            if (keyControl is { wasPressedThisFrame: true })
             {
                 showDebugPanel = !showDebugPanel;
             }
@@ -718,8 +776,8 @@ namespace Assets.Scripts
 
         private void AutoFillSpritesFromProjectIfNeeded()
         {
-            if (blueHandSprites != null && blueHandSprites.Length >= 7 && blueHandSprites.All(s => s != null) &&
-                redHandSprites != null && redHandSprites.Length >= 7 && redHandSprites.All(s => s != null))
+            if (blueHandSprites is { Length: >= 7 } && blueHandSprites.All(s => s != null) &&
+                redHandSprites is { Length: >= 7 } && redHandSprites.All(s => s != null))
             {
                 return;
             }
@@ -771,14 +829,6 @@ namespace Assets.Scripts
 
             renderer.sprite = sprites[value - 1];
             renderer.enabled = true;
-        }
-
-        private static void DrawMissingBrainMessage()
-        {
-            GUILayout.BeginArea(new Rect(20f, 20f, 420f, 120f), GUI.skin.box);
-            GUILayout.Label("EightGamePlayableController: EightBotBrain reference is missing.");
-            GUILayout.Label("Attach this script to the same GameObject as EightBotBrain.");
-            GUILayout.EndArea();
         }
     }
 }

@@ -11,11 +11,6 @@ namespace Assets.Scripts
 
         public EightGameState CurrentState => GameConfig.CurrentState;
 
-        public void SetState(EightGameState state)
-        {
-            GameConfig.CurrentState = state;
-        }
-
         public void ApplyMove(EightMove move)
         {
             GameConfig.CurrentState = EightGameRules.ApplyMove(GameConfig.CurrentState, move);
@@ -53,7 +48,7 @@ namespace Assets.Scripts
                 }
 
                 var score = GetOutcomeRankForPerspective(child, perspectiveIsWhite);
-                if (score > bestScore)
+                if (score > bestScore || (score == bestScore && ShouldPreferTieBreakMove(state, move, bestMove)))
                 {
                     bestScore = score;
                     bestMove = move;
@@ -64,11 +59,12 @@ namespace Assets.Scripts
             if (useBookEdgeFilter && !foundByBook)
             {
                 // If rule expansion and book transitions disagree, keep bot playable by falling back.
+                Debug.LogWarning("Bot falling back to rule-based move: Book transition mismatch.");
                 foreach (var move in legalMoves)
                 {
                     var child = EightGameRules.ApplyMove(state, move);
                     var score = GetOutcomeRankForPerspective(child, perspectiveIsWhite);
-                    if (score > bestScore)
+                    if (score > bestScore || (score == bestScore && ShouldPreferTieBreakMove(state, move, bestMove)))
                     {
                         bestScore = score;
                         bestMove = move;
@@ -77,20 +73,6 @@ namespace Assets.Scripts
             }
 
             return bestMove;
-        }
-
-        public StrategyEvaluation EvaluateCurrentState()
-        {
-            var state = GameConfig.CurrentState;
-            var rank = GetOutcomeRankForPerspective(state, state.WhiteTurn);
-            var outcome = ToStrategyOutcome(rank);
-            var plies = Mathf.Abs(rank) >= 2 ? 2 : (rank == 0 ? 0 : 1);
-            return new StrategyEvaluation(outcome, plies, GetOptimalMove());
-        }
-
-        public IReadOnlyList<EightMove> GetRuleBasedMoves()
-        {
-            return EightGameRules.GetLegalMoves(GameConfig.CurrentState);
         }
 
         public IReadOnlyList<EightGameState> GetAllPossibleNextStatesFromData8()
@@ -102,12 +84,6 @@ namespace Assets.Scripts
             }
 
             return _book.GetPossibleNextStates(GameConfig.CurrentState);
-        }
-
-        public IReadOnlyCollection<EightGameState> GetAllStatesFromData8()
-        {
-            EnsureBookLoaded();
-            return _book?.States ?? new List<EightGameState>();
         }
 
         public bool TryGetCurrentStateClassFromData8(out string stateClass)
@@ -147,43 +123,34 @@ namespace Assets.Scripts
         {
             EnsureBookLoaded();
             if (_book == null) return 0;
-            if (!_book.TryGetClass(state, out var stateClass) || string.IsNullOrWhiteSpace(stateClass)) return 0;
-
-            var tags = stateClass.Split(' ');
-            var classSide = string.Empty;
-            var hasWin = false;
-            var hasWinWin = false;
-            var hasLose = false;
-            var hasLoseLose = false;
-
-            foreach (var raw in tags)
-            {
-                if (string.IsNullOrWhiteSpace(raw)) continue;
-                var tag = raw.Trim().ToLowerInvariant();
-                if (tag == "white" || tag == "black") classSide = tag;
-                else if (tag == "win") hasWin = true;
-                else if (tag == "winwin") hasWinWin = true;
-                else if (tag == "lose") hasLose = true;
-                else if (tag == "loselose") hasLoseLose = true;
-            }
-
-            var classSideRank = 0;
-            if (hasWinWin) classSideRank = 2;
-            else if (hasWin) classSideRank = 1;
-            else if (hasLoseLose) classSideRank = -2;
-            else if (hasLose) classSideRank = -1;
-
-            if (string.IsNullOrEmpty(classSide) || classSideRank == 0) return 0;
-
-            var sideToMoveToken = state.WhiteTurn ? "white" : "black";
-            return classSide == sideToMoveToken ? classSideRank : -classSideRank;
+            return _book.TryGetSideToMoveRank(state, out var rank) ? rank : 0;
         }
 
-        private static StrategyOutcome ToStrategyOutcome(int rank)
+        private static bool ShouldPreferTieBreakMove(EightGameState state, EightMove candidate, EightMove currentBest)
         {
-            if (rank > 0) return StrategyOutcome.Win;
-            if (rank < 0) return StrategyOutcome.Lose;
-            return StrategyOutcome.Draw;
+            // If scores are tied, prefer a move that lands exactly on 8 (hand gets removed).
+            var candidateGetsEight = MoveGetsEight(state, candidate);
+            var currentBestGetsEight = MoveGetsEight(state, currentBest);
+            return candidateGetsEight && !currentBestGetsEight;
+        }
+
+        private static bool MoveGetsEight(EightGameState state, EightMove move)
+        {
+            int own;
+            int opponent;
+
+            if (state.WhiteTurn)
+            {
+                own = move.OwnHandIndex == 0 ? state.WhiteA : state.WhiteB;
+                opponent = move.OpponentHandIndex == 0 ? state.BlackA : state.BlackB;
+            }
+            else
+            {
+                own = move.OwnHandIndex == 0 ? state.BlackA : state.BlackB;
+                opponent = move.OpponentHandIndex == 0 ? state.WhiteA : state.WhiteB;
+            }
+
+            return own + opponent == 8;
         }
     }
 }
