@@ -144,7 +144,7 @@ Transform:
   m_GameObject: {fileID: 649425002}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: -7.5, y: -2.5, z: 0}
+  m_LocalPosition: {x: -1.5, y: -2.5, z: 0}
   m_LocalScale: {x: -1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -175,7 +175,7 @@ Transform:
   m_GameObject: {fileID: 1261878791}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: -6.93, y: 1.38, z: 0}
+  m_LocalPosition: {x: -1.5, y: 2.5, z: 0}
   m_LocalScale: {x: -1, y: -1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -206,7 +206,7 @@ Transform:
   m_GameObject: {fileID: 1298557459}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 6.7, y: -2.22, z: 0}
+  m_LocalPosition: {x: 1.5, y: -2.5, z: 0}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -374,7 +374,7 @@ Transform:
   m_GameObject: {fileID: 1617999544}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 7.16, y: 1.25, z: 0}
+  m_LocalPosition: {x: 1.5, y: 2.5, z: 0}
   m_LocalScale: {x: 1, y: -1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -442,6 +442,16 @@ MonoBehaviour:
   whiteIsHuman: 1
   blackIsHuman: 0
   botMoveDelaySeconds: 0.55
+  botApproachDurationSeconds: 1
+  botStopNearTargetDistance: 2.5
+  botImpactPauseSeconds: 0.5
+  botResultHoldSeconds: 0.5
+  botReturnDurationSeconds: 1
+  showDebugPanel: 0
+  allowToggleDebugHotkey: 1
+  toggleDebugKey: 94
+  p1TurnBackgroundColor: {r: 0.06, g: 0.32, b: 0.73, a: 1}
+  p2TurnBackgroundColor: {r: 0.98, g: 0.62, b: 0.82, a: 1}
   p1Left: {fileID: 649425003}
   p1Right: {fileID: 1298557460}
   p2Left: {fileID: 1261878792}

@@ -1,5 +1,6 @@
 using UnityEngine;
 using System.Linq;
+using System.Collections;
 using UnityEngine.InputSystem;
 
 namespace Assets.Scripts
@@ -10,6 +11,13 @@ namespace Assets.Scripts
         [SerializeField] private bool whiteIsHuman = true;
         [SerializeField] private bool blackIsHuman = false;
         [SerializeField] private float botMoveDelaySeconds = 0.55f;
+        [Header("Bot Move Animation")] [SerializeField]
+        private float botApproachDurationSeconds = 0.18f;
+        [SerializeField] private float botStopNearTargetDistance = 0.8f;
+
+        [SerializeField] private float botImpactPauseSeconds = 0.1f;
+        [SerializeField] private float botResultHoldSeconds = 0.2f;
+        [SerializeField] private float botReturnDurationSeconds = 0.2f;
         [Header("Debug UI")] [SerializeField] private bool showDebugPanel = false;
         [SerializeField] private bool allowToggleDebugHotkey = true;
         [SerializeField] private Key toggleDebugKey = Key.F1;
@@ -46,6 +54,9 @@ namespace Assets.Scripts
         private bool _isDragging;
         private bool _draggingWhite;
         private int _dragOwnHandIndex = -1;
+        private bool _isBotAnimating;
+        private bool _botAnimatingTurnWasWhite;
+        private bool _isPlayerReturnAnimating;
 
         private void Start()
         {
@@ -73,13 +84,41 @@ namespace Assets.Scripts
             var state = brain.CurrentState;
             if (state.IsTerminal)
             {
-                ResetHandPositions();
+                if (!_isBotAnimating && !_isPlayerReturnAnimating)
+                {
+                    ResetHandPositions();
+                }
+
                 RefreshHandSprites();
-                ApplyTurnBackgroundColor(state);
+                if (_isBotAnimating)
+                {
+                    ApplyTurnBackgroundColor(_botAnimatingTurnWasWhite);
+                }
+                else
+                {
+                    ApplyTurnBackgroundColor(state);
+                }
+
                 return;
             }
 
             HandleDebugPanelToggleHotkey();
+
+            if (_isBotAnimating || _isPlayerReturnAnimating)
+            {
+                RefreshHandSprites();
+                if (_isBotAnimating)
+                {
+                    ApplyTurnBackgroundColor(_botAnimatingTurnWasWhite);
+                }
+                else
+                {
+                    ApplyTurnBackgroundColor(GameConfig.CurrentState);
+                }
+
+                return;
+            }
+
             HandleHumanDragInput(state);
             RefreshHandSprites();
             ApplyTurnBackgroundColor(GameConfig.CurrentState);
@@ -90,11 +129,12 @@ namespace Assets.Scripts
             var move = brain.GetOptimalMove();
             if (move.HasValue)
             {
-                brain.ApplyMove(move.Value);
+                StartCoroutine(PlayBotMoveAnimationAndApply(state, move.Value));
             }
-
-            ResetHandPositions();
-            _nextBotMoveAt = Time.time + botMoveDelaySeconds;
+            else
+            {
+                _nextBotMoveAt = Time.time + botMoveDelaySeconds;
+            }
         }
 
         private void OnGUI()
@@ -182,8 +222,8 @@ namespace Assets.Scripts
 
             string text;
             if (whiteDead && blackDead) text = "Draw!";
-            else if (whiteDead) text = "Blue wins!";
-            else if (blackDead) text = "Red wins!";
+            else if (whiteDead) text = "Red wins!";
+            else if (blackDead) text = "Blue wins!";
             else text = "Game over";
 
             var oldAlignment = GUI.skin.label.alignment;
@@ -218,8 +258,8 @@ namespace Assets.Scripts
             var blackDead = state.BlackA == 0 && state.BlackB == 0;
 
             if (whiteDead && blackDead) return "Game over: Draw";
-            if (whiteDead) return "Game over: White wins";
-            if (blackDead) return "Game over: Black wins";
+            if (whiteDead) return "Game over: Black wins";
+            if (blackDead) return "Game over: White wins";
             return "Game over";
         }
 
@@ -257,10 +297,13 @@ namespace Assets.Scripts
             if (_isDragging && TryGetPointerUpScreen(out var upScreen))
             {
                 var upPos = ScreenToWorldOnHandsPlane(upScreen);
-                TryFinishDrag(state, upPos);
+                var moveApplied = TryFinishDrag(state, upPos);
                 _isDragging = false;
                 _dragOwnHandIndex = -1;
-                ResetHandPositions();
+                if (!moveApplied)
+                {
+                    ResetHandPositions();
+                }
             }
         }
 
@@ -303,22 +346,22 @@ namespace Assets.Scripts
             _dragOwnHandIndex = chosenIndex;
         }
 
-        private void TryFinishDrag(EightGameState state, Vector3 pointerWorld)
+        private bool TryFinishDrag(EightGameState state, Vector3 pointerWorld)
         {
             var ownIsWhite = state.WhiteTurn;
-            if (!_isDragging || ownIsWhite != _draggingWhite) return;
+            if (!_isDragging || ownIsWhite != _draggingWhite) return false;
 
             var ownValue = ownIsWhite
                 ? (_dragOwnHandIndex == 0 ? state.WhiteA : state.WhiteB)
                 : (_dragOwnHandIndex == 0 ? state.BlackA : state.BlackB);
-            if (ownValue == 0) return;
+            if (ownValue == 0) return false;
 
             var oppAValue = ownIsWhite ? state.BlackA : state.WhiteA;
             var oppBValue = ownIsWhite ? state.BlackB : state.WhiteB;
 
             var oppA = GetHandTransform(!ownIsWhite, 0);
             var oppB = GetHandTransform(!ownIsWhite, 1);
-            if (oppA == null || oppB == null) return;
+            if (oppA == null || oppB == null) return false;
 
             var chosenOpponentIndex = -1;
             var bestDistance = float.MaxValue;
@@ -342,10 +385,115 @@ namespace Assets.Scripts
                 }
             }
 
-            if (chosenOpponentIndex < 0) return;
+            if (chosenOpponentIndex < 0) return false;
 
+            var ownHand = GetHandTransform(ownIsWhite, _dragOwnHandIndex);
+            var ownStartPos = GetHandStartPosition(ownIsWhite, _dragOwnHandIndex);
             brain.ApplyMove(new EightMove(_dragOwnHandIndex, chosenOpponentIndex));
+            RefreshHandSprites();
+
+            if (ownHand != null)
+            {
+                StartCoroutine(AnimatePlayerHandBack(ownHand, ownHand.position, ownStartPos));
+            }
+            else
+            {
+                ResetHandPositions();
+                _nextBotMoveAt = Time.time + botMoveDelaySeconds;
+            }
+
+            return true;
+        }
+
+        private IEnumerator PlayBotMoveAnimationAndApply(EightGameState stateBeforeMove, EightMove move)
+        {
+            _isBotAnimating = true;
+            _botAnimatingTurnWasWhite = stateBeforeMove.WhiteTurn;
+
+            var ownIsWhite = stateBeforeMove.WhiteTurn;
+            var ownHand = GetHandTransform(ownIsWhite, move.OwnHandIndex);
+            var targetHand = GetHandTransform(!ownIsWhite, move.OpponentHandIndex);
+
+            if (ownHand == null || targetHand == null)
+            {
+                brain.ApplyMove(move);
+                ResetHandPositions();
+                _nextBotMoveAt = Time.time + botMoveDelaySeconds;
+                _isBotAnimating = false;
+                yield break;
+            }
+
+            var startPos = ownHand.position;
+            var targetPos = targetHand.position;
+            targetPos.z = startPos.z;
+            var toTarget = targetPos - startPos;
+            var stopPos = targetPos;
+            if (toTarget.sqrMagnitude > 0.0001f)
+            {
+                var distance = toTarget.magnitude;
+                var travel = Mathf.Max(0f, distance - Mathf.Max(0f, botStopNearTargetDistance));
+                stopPos = startPos + toTarget.normalized * travel;
+            }
+
+            yield return AnimateHandPosition(ownHand, startPos, stopPos, botApproachDurationSeconds);
+
+            // Become the sum immediately on contact, then hold before returning.
+            brain.ApplyMove(move);
+            RefreshHandSprites();
+
+            if (botImpactPauseSeconds > 0f)
+            {
+                yield return new WaitForSeconds(botImpactPauseSeconds);
+            }
+
+            if (botResultHoldSeconds > 0f)
+            {
+                yield return new WaitForSeconds(botResultHoldSeconds);
+            }
+
+            yield return AnimateHandPosition(ownHand, ownHand.position, startPos, botReturnDurationSeconds);
+
+            ResetHandPositions();
             _nextBotMoveAt = Time.time + botMoveDelaySeconds;
+            _isBotAnimating = false;
+        }
+
+        private IEnumerator AnimatePlayerHandBack(Transform hand, Vector3 from, Vector3 to)
+        {
+            _isPlayerReturnAnimating = true;
+
+            if (botResultHoldSeconds > 0f)
+            {
+                yield return new WaitForSeconds(botResultHoldSeconds);
+            }
+
+            yield return AnimateHandPosition(hand, from, to, botReturnDurationSeconds);
+            ResetHandPositions();
+            _isPlayerReturnAnimating = false;
+            _nextBotMoveAt = Time.time + botMoveDelaySeconds;
+        }
+
+        private static IEnumerator AnimateHandPosition(Transform hand, Vector3 from, Vector3 to, float durationSeconds)
+        {
+            if (hand == null) yield break;
+
+            if (durationSeconds <= 0f)
+            {
+                hand.position = to;
+                yield break;
+            }
+
+            var elapsed = 0f;
+            while (elapsed < durationSeconds)
+            {
+                elapsed += Time.deltaTime;
+                var t = Mathf.Clamp01(elapsed / durationSeconds);
+                var easedT = Mathf.SmoothStep(0f, 1f, t);
+                hand.position = Vector3.Lerp(from, to, easedT);
+                yield return null;
+            }
+
+            hand.position = to;
         }
 
         private Transform GetHandTransform(bool white, int handIndex)
@@ -391,6 +539,16 @@ namespace Assets.Scripts
             if (p1Right != null) _p1RightStart = p1Right.position;
             if (p2Left != null) _p2LeftStart = p2Left.position;
             if (p2Right != null) _p2RightStart = p2Right.position;
+        }
+
+        private Vector3 GetHandStartPosition(bool white, int handIndex)
+        {
+            if (white)
+            {
+                return handIndex == 0 ? _p1LeftStart : _p1RightStart;
+            }
+
+            return handIndex == 0 ? _p2LeftStart : _p2RightStart;
         }
 
         private void ResetHandPositions()
@@ -525,7 +683,15 @@ namespace Assets.Scripts
             if (_mainCamera == null) _mainCamera = Camera.main;
             if (_mainCamera == null) return;
 
-            _mainCamera.backgroundColor = state.WhiteTurn ? p1TurnBackgroundColor : p2TurnBackgroundColor;
+            ApplyTurnBackgroundColor(state.WhiteTurn);
+        }
+
+        private void ApplyTurnBackgroundColor(bool whiteTurn)
+        {
+            if (_mainCamera == null) _mainCamera = Camera.main;
+            if (_mainCamera == null) return;
+
+            _mainCamera.backgroundColor = whiteTurn ? p1TurnBackgroundColor : p2TurnBackgroundColor;
         }
 
         private void EnsureHandRenderers()

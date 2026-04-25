@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text.RegularExpressions;
 using UnityEngine;
 
 namespace Assets.Scripts
@@ -51,8 +50,9 @@ namespace Assets.Scripts
                     ? BlackA == 0 && BlackB == 0
                     : WhiteA == 0 && WhiteB == 0;
 
-                if (sideToMoveDead) return 1;
-                if (opponentDead) return -1;
+                if (sideToMoveDead && opponentDead) return 0;
+                if (sideToMoveDead) return -1;
+                if (opponentDead) return 1;
                 return 0;
             }
         }
@@ -100,7 +100,7 @@ namespace Assets.Scripts
 
         private static void NormalizePair(int first, int second, out int a, out int b)
         {
-            if (first <= second)
+            if (GetNormalizationOrder(first) <= GetNormalizationOrder(second))
             {
                 a = first;
                 b = second;
@@ -109,6 +109,12 @@ namespace Assets.Scripts
 
             a = second;
             b = first;
+        }
+
+        // data8 canonical form treats "None" as the largest hand value when ordering pairs.
+        private static int GetNormalizationOrder(int value)
+        {
+            return value == 0 ? 8 : value;
         }
     }
 
@@ -207,10 +213,6 @@ namespace Assets.Scripts
 
     public sealed class Data8Book
     {
-        private static readonly Regex LabelRegex = new Regex(
-            @"^\(([^,]+),\s*([^)]+)\)\s*(<)?\s*\n\(([^,]+),\s*([^)]+)\)\s*(<)?\s*$",
-            RegexOptions.Compiled);
-
         private readonly Dictionary<EightGameState, HashSet<EightGameState>> _transitions = new Dictionary<EightGameState, HashSet<EightGameState>>();
         private readonly Dictionary<EightGameState, string> _classesByState = new Dictionary<EightGameState, string>();
 
@@ -242,11 +244,12 @@ namespace Assets.Scripts
                         continue;
                     }
 
-                    nodeById[item.data.id] = state;
-                    book._classesByState[state] = item.classes ?? string.Empty;
-                    if (!book._transitions.ContainsKey(state))
+                    var normalizedState = state.NormalizeForCalculation();
+                    nodeById[item.data.id] = normalizedState;
+                    book._classesByState[normalizedState] = item.classes ?? string.Empty;
+                    if (!book._transitions.ContainsKey(normalizedState))
                     {
-                        book._transitions[state] = new HashSet<EightGameState>();
+                        book._transitions[normalizedState] = new HashSet<EightGameState>();
                     }
                 }
             }
@@ -276,13 +279,36 @@ namespace Assets.Scripts
         public bool TryGetClass(EightGameState state, out string stateClass)
         {
             var normalized = state.NormalizeForCalculation();
-            return _classesByState.TryGetValue(normalized, out stateClass);
+            if (_classesByState.TryGetValue(normalized, out stateClass))
+            {
+                return true;
+            }
+
+            var flippedTurn = new EightGameState(
+                normalized.WhiteA,
+                normalized.WhiteB,
+                normalized.BlackA,
+                normalized.BlackB,
+                !normalized.WhiteTurn);
+
+            return _classesByState.TryGetValue(flippedTurn, out stateClass);
         }
 
         public IReadOnlyList<EightGameState> GetPossibleNextStates(EightGameState state)
         {
             var normalized = state.NormalizeForCalculation();
             if (_transitions.TryGetValue(normalized, out var states))
+            {
+                return states.ToArray();
+            }
+
+            var flippedTurn = new EightGameState(
+                normalized.WhiteA,
+                normalized.WhiteB,
+                normalized.BlackA,
+                normalized.BlackB,
+                !normalized.WhiteTurn);
+            if (_transitions.TryGetValue(flippedTurn, out states))
             {
                 return states.ToArray();
             }
@@ -294,17 +320,39 @@ namespace Assets.Scripts
         {
             state = default;
             if (string.IsNullOrWhiteSpace(label)) return false;
+            var normalized = label.Replace("\r", string.Empty);
+            var lines = normalized.Split('\n');
+            if (lines.Length != 2) return false;
 
-            var match = LabelRegex.Match(label);
-            if (!match.Success) return false;
+            if (!TryParsePairLine(lines[0], out var whiteA, out var whiteB, out var whiteMarker)) return false;
+            if (!TryParsePairLine(lines[1], out var blackA, out var blackB, out var blackMarker)) return false;
 
-            if (!TryParseHandToken(match.Groups[1].Value, out var whiteA)) return false;
-            if (!TryParseHandToken(match.Groups[2].Value, out var whiteB)) return false;
-            if (!TryParseHandToken(match.Groups[4].Value, out var blackA)) return false;
-            if (!TryParseHandToken(match.Groups[5].Value, out var blackB)) return false;
+            var whiteTurn = whiteMarker && !blackMarker;
+            var blackTurn = blackMarker && !whiteMarker;
+            if (!whiteTurn && !blackTurn) return false;
 
-            var whiteTurn = match.Groups[3].Success;
             state = new EightGameState(whiteA, whiteB, blackA, blackB, whiteTurn);
+            return true;
+        }
+
+        private static bool TryParsePairLine(string line, out int a, out int b, out bool hasTurnMarker)
+        {
+            a = 0;
+            b = 0;
+            hasTurnMarker = false;
+            if (line == null) return false;
+
+            var open = line.IndexOf('(');
+            var comma = line.IndexOf(',', open + 1);
+            var close = line.IndexOf(')', comma + 1);
+            if (open < 0 || comma < 0 || close < 0) return false;
+
+            var aToken = line.Substring(open + 1, comma - open - 1);
+            var bToken = line.Substring(comma + 1, close - comma - 1);
+            if (!TryParseHandToken(aToken, out a)) return false;
+            if (!TryParseHandToken(bToken, out b)) return false;
+
+            hasTurnMarker = line.IndexOf('<', close + 1) >= 0;
             return true;
         }
 
@@ -373,7 +421,7 @@ namespace Assets.Scripts
         {
             if (state.IsTerminal)
             {
-                var terminalOutcome = state.OutcomeForSideToMove > 0 ? StrategyOutcome.Win : StrategyOutcome.Lose;
+                var terminalOutcome = ToOutcome(state.OutcomeForSideToMove);
                 return new StrategyEvaluation(terminalOutcome, 0, null);
             }
 
@@ -410,9 +458,7 @@ namespace Assets.Scripts
 
             if (state.IsTerminal)
             {
-                var terminal = new StrategyScore(
-                    state.OutcomeForSideToMove > 0 ? StrategyOutcome.Win : StrategyOutcome.Lose,
-                    0);
+                var terminal = new StrategyScore(ToOutcome(state.OutcomeForSideToMove), 0);
                 _memo[key] = terminal;
                 return terminal;
             }
@@ -532,6 +578,13 @@ namespace Assets.Scripts
                 Outcome = outcome;
                 Plies = plies;
             }
+        }
+
+        private static StrategyOutcome ToOutcome(int value)
+        {
+            if (value > 0) return StrategyOutcome.Win;
+            if (value < 0) return StrategyOutcome.Lose;
+            return StrategyOutcome.Draw;
         }
     }
 }
