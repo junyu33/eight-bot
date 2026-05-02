@@ -90,6 +90,23 @@ jobs:
             "outputDirectory": ".",
             "headers": [
               {
+                "source": "/(.*)",
+                "headers": [
+                  {
+                    "key": "X-Content-Type-Options",
+                    "value": "nosniff"
+                  },
+                  {
+                    "key": "Referrer-Policy",
+                    "value": "strict-origin-when-cross-origin"
+                  },
+                  {
+                    "key": "Permissions-Policy",
+                    "value": "accelerometer=(), ambient-light-sensor=(), camera=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()"
+                  }
+                ]
+              },
+              {
                 "source": "/webgpu-only/Build/(.*)\\.data\\.br",
                 "headers": [
                   { "key": "Content-Type", "value": "application/octet-stream" },
